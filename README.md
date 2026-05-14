@@ -57,6 +57,25 @@ bunx iemong/pixel-diff URL_A URL_B --keep --workdir ./shots
 
 Outputs in multi-viewport mode are written as `<stem>-<W>x<H>.png` — e.g. `diff-375x812.png`, `diff-1280x800.png`.
 
+### Authenticated URLs
+
+For pages that require login, save the browser state once and pass it via `--state`:
+
+```bash
+# 1. Log in interactively in agent-browser, then dump cookies/localStorage
+agent-browser open https://app.example.com/login
+# ... fill creds, click login ...
+agent-browser state save /tmp/auth.json
+
+# 2. Diff authenticated pages — state is loaded into each capture session
+bunx iemong/pixel-diff \
+  https://app.example.com/dashboard \
+  https://staging.example.com/dashboard \
+  --state /tmp/auth.json --json
+```
+
+pixel-diff runs `agent-browser state load <path>` against each fresh capture session before navigating, so cookies / localStorage / sessionStorage are present when the target URL loads. Without `--state`, captures hit the URL anonymously and you'll diff login pages, not the authenticated views.
+
 ### Install globally
 
 ```bash
@@ -135,6 +154,7 @@ On error, `--json` emits a structured object instead:
 | `--wait <ms>` | URL | Extra wait after `networkidle` (default `800`). |
 | `--workdir <dir>` | URL | Where intermediate captures live. Default `$TMPDIR/pixel-diff/<ts>`. |
 | `--keep` | URL | Keep workdir on success. |
+| `--state <path>` | URL | Load an agent-browser state file (cookies/localStorage) into each capture session before navigating. Required for auth-protected URLs. |
 | `-h`, `--help` | — | Show full help. |
 | `-V`, `--version` | — | Print version. |
 

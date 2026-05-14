@@ -50,6 +50,10 @@ OPTIONS
       --workdir <dir>            Where intermediate captures live. URL mode only.
                                  Default: \$TMPDIR/pixel-diff/<ts>.
       --keep                     Don't delete the workdir on success. URL mode only.
+      --state <path>             Load an agent-browser state file into each capture session
+                                 before navigating. Use for authenticated pages.
+                                 Save state first with \`agent-browser state save <path>\`.
+                                 URL mode only.
   -h, --help                     Show this help and exit.
   -V, --version                  Print version and exit.
 
@@ -75,6 +79,12 @@ EXAMPLES
 
   # Mask the header (top 80px) and a sidebar rect before diffing
   pixel-diff a.png b.png --ignore 0,0,1280,80 --ignore 1100,80,180,500
+
+  # Authenticated URL diff — save state once, reuse forever
+  agent-browser open https://app.example.com/login   # log in interactively
+  agent-browser state save /tmp/auth.json
+  pixel-diff https://app.example.com/dashboard{,?env=stg} \\
+    --state /tmp/auth.json --json
 
   # One-liner from GitHub
   bunx iemong/pixel-diff URL_A URL_B --json
@@ -128,6 +138,7 @@ type Args = {
   waitMs: number;
   workdir: string | null;
   keep: boolean;
+  statePath: string | null;
 };
 
 function parseViewportSpec(s: string): Viewport | null {
@@ -172,6 +183,7 @@ function parseArgs(argv: string[]): Args | { _error: string } {
     waitMs: 800,
     workdir: null,
     keep: false,
+    statePath: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -206,6 +218,10 @@ function parseArgs(argv: string[]): Args | { _error: string } {
       out.workdir = raw;
     } else if (a === "--keep") {
       out.keep = true;
+    } else if (a === "--state" || a.startsWith("--state=")) {
+      const raw = a.startsWith("--state=") ? a.slice("--state=".length) : argv[++i];
+      if (raw === undefined) return { _error: "missing value for --state" };
+      out.statePath = raw;
     } else if (a === "--ignore" || a.startsWith("--ignore=")) {
       const raw = a.startsWith("--ignore=") ? a.slice("--ignore=".length) : argv[++i];
       if (raw === undefined) return { _error: "missing value for --ignore" };
@@ -368,7 +384,7 @@ async function captureUrl(
   url: string,
   viewport: Viewport,
   pngOut: string,
-  opts: { fullPage: boolean; waitMs: number; sessionSuffix: string },
+  opts: { fullPage: boolean; waitMs: number; sessionSuffix: string; statePath: string | null },
   json: boolean,
 ): Promise<void> {
   const session = `pixel-diff-${process.pid}-${Date.now()}-${opts.sessionSuffix}`;
@@ -378,6 +394,9 @@ async function captureUrl(
   try {
     await $`agent-browser --session ${session} open about:blank`.quiet();
     await $`agent-browser --session ${session} set viewport ${W} ${H}`.quiet();
+    if (opts.statePath) {
+      await $`agent-browser --session ${session} state load ${opts.statePath}`.quiet();
+    }
     await $`agent-browser --session ${session} open ${url}`.quiet();
     await $`agent-browser --session ${session} wait --load networkidle`.nothrow().quiet();
     if (opts.waitMs > 0) {
@@ -399,8 +418,9 @@ async function captureUrl(
         url,
         viewport,
         cause: (e as Error).message,
-        suggestion:
-          "verify the URL loads in agent-browser; for auth, run `agent-browser state load` first",
+        suggestion: opts.statePath
+          ? "verify the state file is valid and the URL loads after state load"
+          : "verify the URL loads in agent-browser; for auth pages pass --state <auth.json>",
       },
       [
         `error: agent-browser capture failed for ${url}`,
@@ -440,12 +460,13 @@ async function runImageMode(args: Args, aPath: string, bPath: string, outPath: s
       suggestion: "drop --viewport, or pass URLs instead of file paths",
     }, ["error: --viewport requires URL inputs"]);
   }
-  for (const flag of ["--full-page", "--wait", "--workdir", "--keep"] as const) {
+  for (const flag of ["--full-page", "--wait", "--workdir", "--keep", "--state"] as const) {
     if (
       (flag === "--full-page" && args.fullPage) ||
       (flag === "--wait" && args.waitMs !== 800) ||
       (flag === "--workdir" && args.workdir !== null) ||
-      (flag === "--keep" && args.keep)
+      (flag === "--keep" && args.keep) ||
+      (flag === "--state" && args.statePath !== null)
     ) {
       fail(json, EXIT.USAGE, {
         error: "usage",
@@ -495,6 +516,15 @@ async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: strin
   const json = args.json;
   ensureAgentBrowser(json);
 
+  if (args.statePath && !existsSync(args.statePath)) {
+    fail(json, EXIT.NOT_FOUND, {
+      error: "not_found",
+      message: `state file not found: ${args.statePath}`,
+      path: args.statePath,
+      suggestion: "save it first with `agent-browser state save <path>`",
+    }, [`error: state file not found: ${args.statePath}`]);
+  }
+
   const viewports = args.viewports ?? [{ width: 1280, height: 800 }];
   const multi = viewports.length > 1;
 
@@ -510,6 +540,9 @@ async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: strin
   log(json, `  url_b:      ${urlB}`);
   log(json, `  viewports:  ${viewports.map((v) => `${v.width}x${v.height}`).join(", ")}`);
   log(json, `  workdir:    ${workdir}`);
+  if (args.statePath) {
+    log(json, `  state:      ${args.statePath}`);
+  }
   if (args.ignore.length > 0) {
     log(json, `  ignore:     ${args.ignore.map((r) => `${r.x},${r.y},${r.w},${r.h}`).join(" / ")}`);
   }
@@ -519,8 +552,13 @@ async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: strin
     log(json, `→ capture ${tag}`);
     const aPng = join(workdir, `a-${tag}.png`);
     const bPng = join(workdir, `b-${tag}.png`);
-    await captureUrl(urlA, v, aPng, { fullPage: args.fullPage, waitMs: args.waitMs, sessionSuffix: `a-${tag}` }, json);
-    await captureUrl(urlB, v, bPng, { fullPage: args.fullPage, waitMs: args.waitMs, sessionSuffix: `b-${tag}` }, json);
+    const captureOpts = {
+      fullPage: args.fullPage,
+      waitMs: args.waitMs,
+      statePath: args.statePath,
+    };
+    await captureUrl(urlA, v, aPng, { ...captureOpts, sessionSuffix: `a-${tag}` }, json);
+    await captureUrl(urlB, v, bPng, { ...captureOpts, sessionSuffix: `b-${tag}` }, json);
 
     const diffOut = multi ? suffixedOut(outPath, v) : outPath;
     log(json, `→ diff ${tag}`);
