@@ -1,18 +1,21 @@
-# @iemong/pixel-diff
+# pixel-diff
 
 Pixel-level PNG diff CLI powered by [pixelmatch](https://github.com/mapbox/pixelmatch).
-Run it as a one-liner — no install, no repo needed.
+Runs on [Bun](https://bun.com). One-liner straight from GitHub — no install, no registry.
 
 ## Usage
 
+Requires Bun (`curl -fsSL https://bun.sh/install | bash`).
+
 ```bash
-bunx @iemong/pixel-diff a.png b.png                       # writes ./diff.png
-bunx @iemong/pixel-diff a.png b.png out.png               # custom output path
-bunx @iemong/pixel-diff a.png b.png --threshold 0.05      # stricter match
-bunx @iemong/pixel-diff a.png b.png --json                # machine-readable
-npx  @iemong/pixel-diff a.png b.png --json                # works on npx too
-bunx @iemong/pixel-diff --help                            # full help
+bunx github:iemong/pixel-diff a.png b.png                       # writes ./diff.png
+bunx github:iemong/pixel-diff a.png b.png out.png               # custom output path
+bunx github:iemong/pixel-diff a.png b.png --threshold 0.05      # stricter match
+bunx github:iemong/pixel-diff a.png b.png --json                # machine-readable
+bunx github:iemong/pixel-diff --help                            # full help
 ```
+
+`bunx` clones the repo, installs deps, and runs `index.ts` directly.
 
 Human-readable output:
 
@@ -72,7 +75,6 @@ Both images must be the same dimensions — resize/crop first if they're not.
 ```bash
 bun install
 bun run diff sample-a.png sample-b.png
-bun run build      # produces dist/cli.js
 ```
 
 ## License

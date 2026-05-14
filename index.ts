@@ -1,22 +1,8 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
-
-function loadPkg(): { name: string; version: string } {
-  const here = dirname(fileURLToPath(import.meta.url));
-  for (const rel of ["../package.json", "./package.json"]) {
-    const p = resolve(here, rel);
-    if (existsSync(p)) {
-      const data = JSON.parse(readFileSync(p, "utf8"));
-      if (data && typeof data.version === "string") return data;
-    }
-  }
-  return { name: "@iemong/pixel-diff", version: "0.0.0" };
-}
-const pkg = loadPkg();
+import pkg from "./package.json" with { type: "json" };
 
 const EXIT = {
   IDENTICAL: 0,
@@ -66,9 +52,8 @@ EXAMPLES
   # Stricter threshold, custom output path
   pixel-diff a.png b.png out.png --threshold 0.05
 
-  # One-liner, no install
-  bunx ${pkg.name} a.png b.png --json
-  npx  ${pkg.name} a.png b.png --json
+  # One-liner from GitHub (no install, no registry)
+  bunx github:iemong/pixel-diff a.png b.png --json
 
 JSON SCHEMA (success)
   {
