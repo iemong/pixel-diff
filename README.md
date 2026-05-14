@@ -6,12 +6,15 @@ Run it as a one-liner — no install, no repo needed.
 ## Usage
 
 ```bash
-bunx @iemong/pixel-diff a.png b.png            # writes ./diff.png
-bunx @iemong/pixel-diff a.png b.png out.png    # custom output path
-npx  @iemong/pixel-diff a.png b.png            # works on npx too
+bunx @iemong/pixel-diff a.png b.png                       # writes ./diff.png
+bunx @iemong/pixel-diff a.png b.png out.png               # custom output path
+bunx @iemong/pixel-diff a.png b.png --threshold 0.05      # stricter match
+bunx @iemong/pixel-diff a.png b.png --json                # machine-readable
+npx  @iemong/pixel-diff a.png b.png --json                # works on npx too
+bunx @iemong/pixel-diff --help                            # full help
 ```
 
-Output:
+Human-readable output:
 
 ```
 size:        1280x720 (921,600 px)
@@ -19,15 +22,48 @@ diff pixels: 1,234 (0.134%)
 diff image:  ./diff.png
 ```
 
-Exit code: `0` if identical, `1` if any pixel differs, `2` on usage / size-mismatch errors.
+JSON output (`--json` writes a single JSON object to stdout; logs go to stderr):
+
+```json
+{
+  "image_a": "a.png", "image_b": "b.png", "out": "diff.png",
+  "width": 1280, "height": 720,
+  "total_pixels": 921600, "diff_pixels": 1234, "diff_percent": 0.134,
+  "threshold": 0.1, "identical": false
+}
+```
+
+On error, `--json` emits a structured object instead:
+
+```json
+{
+  "error": "size_mismatch",
+  "message": "image dimensions do not match",
+  "image_a": { "path": "a.png", "width": 100, "height": 100 },
+  "image_b": { "path": "b.png", "width": 200, "height": 100 },
+  "suggestion": "resize or crop both images to the same dimensions before diffing"
+}
+```
 
 ## Options
 
-- `PIXELMATCH_THRESHOLD` (env): pixelmatch threshold, default `0.1`. Higher = more tolerant.
+| Flag | Description |
+| --- | --- |
+| `-t`, `--threshold <num>` | Pixelmatch sensitivity 0..1 (default `0.1`, lower = stricter). Also reads `PIXELMATCH_THRESHOLD`. |
+| `-j`, `--json` | Emit a single JSON object to stdout. |
+| `-h`, `--help` | Show full help and exit. |
+| `-V`, `--version` | Print version and exit. |
 
-```bash
-PIXELMATCH_THRESHOLD=0.05 bunx @iemong/pixel-diff a.png b.png
-```
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | images are identical |
+| `1` | differences found (diff image was written) |
+| `2` | usage error (bad arguments) |
+| `3` | input file not found |
+| `4` | size mismatch between the two images |
+| `5` | failed to read or decode a PNG |
 
 Both images must be the same dimensions — resize/crop first if they're not.
 
