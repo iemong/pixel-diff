@@ -76,6 +76,24 @@ bunx iemong/pixel-diff \
 
 pixel-diff runs `agent-browser state load <path>` against each fresh capture session before navigating, so cookies / localStorage / sessionStorage are present when the target URL loads. Without `--state`, captures hit the URL anonymously and you'll diff login pages, not the authenticated views.
 
+### "What exactly is shifted, and by how many px?"
+
+When you see a diff and want to quantify it without reaching for DevTools:
+
+```bash
+# 1. The "diff_regions" array already tells you where: a 1280x8 region is
+#    almost always a vertical shift of everything below that y-coordinate.
+bunx iemong/pixel-diff URL_A URL_B --json | jq '.results[0].diff_regions[:3]'
+
+# 2. --rects gives you exact getBoundingClientRect deltas for named selectors.
+bunx iemong/pixel-diff URL_A URL_B \
+  --rects 'h1' --rects '.cta-button' --rects '[data-testid="nav"]' --json |
+  jq '.results[0].rects[] |
+        { selector, deltas: [.matches[] | .delta] }'
+```
+
+The `delta` is `{ dx, dy, dw, dh }` (B minus A in pixels). `{ dx: 0, dy: 8 }` means B's element is 8px lower than A's — no DOM-poking required.
+
 ### Install globally
 
 ```bash
@@ -102,20 +120,24 @@ JSON image mode (`--json` → single object on **stdout**, logs on **stderr**):
   "width": 1280, "height": 720,
   "total_pixels": 921600, "diff_pixels": 1234, "diff_percent": 0.134,
   "threshold": 0.1, "identical": false,
-  "ignore_regions": []
+  "ignore_regions": [],
+  "diff_regions": [
+    { "x": 100, "y": 80, "w": 200, "h": 8, "diff_pixels": 1600 },
+    { "x": 100, "y": 120, "w": 200, "h": 8, "diff_pixels": 1600 }
+  ]
 }
 ```
 
-JSON URL mode (one entry per viewport):
+`diff_regions` is the set of connected diff-pixel clusters, sorted by size (largest first). A `1280x8` cluster on a 1280-wide page almost always means "everything below shifted vertically by 8px."
+
+JSON URL mode (one entry per viewport; `rects` only present when `--rects` was passed):
 
 ```json
 {
   "mode": "url",
   "url_a": "https://old.example.com",
   "url_b": "https://new.example.com",
-  "threshold": 0.1,
-  "ignore_regions": [],
-  "all_identical": false,
+  "threshold": 0.1, "ignore_regions": [], "all_identical": false,
   "results": [
     {
       "viewport": { "width": 1280, "height": 800 },
@@ -124,7 +146,20 @@ JSON URL mode (one entry per viewport):
       "out": "./diff-1280x800.png",
       "width": 1280, "height": 800,
       "total_pixels": 1024000, "diff_pixels": 832, "diff_percent": 0.081,
-      "identical": false
+      "identical": false,
+      "diff_regions": [...],
+      "rects": [
+        {
+          "selector": "h1",
+          "matches": [
+            {
+              "a": { "rect": {"x":24,"y":80,"w":400,"h":48}, "text": "Welcome" },
+              "b": { "rect": {"x":24,"y":88,"w":400,"h":48}, "text": "Welcome" },
+              "delta": { "dx": 0, "dy": 8, "dw": 0, "dh": 0 }
+            }
+          ]
+        }
+      ]
     }
   ]
 }
@@ -155,6 +190,9 @@ On error, `--json` emits a structured object instead:
 | `--workdir <dir>` | URL | Where intermediate captures live. Default `$TMPDIR/pixel-diff/<ts>`. |
 | `--keep` | URL | Keep workdir on success. |
 | `--state <path>` | URL | Load an agent-browser state file (cookies/localStorage) into each capture session before navigating. Required for auth-protected URLs. |
+| `--rects <selector>` | URL | Capture `getBoundingClientRect` for matching elements on both URLs and emit `{ a, b, delta }` per match. Repeatable. |
+| `--min-cluster <N>` | both | Filter out diff regions smaller than N pixels (default `1`). |
+| `--max-regions <N>` | both | Cap the `diff_regions` array at the top N largest clusters (default `100`; `0` = unlimited). |
 | `-h`, `--help` | — | Show full help. |
 | `-V`, `--version` | — | Print version. |
 

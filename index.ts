@@ -20,6 +20,15 @@ const EXIT = {
 
 type Viewport = { width: number; height: number };
 type IgnoreRect = { x: number; y: number; w: number; h: number };
+type DiffRegion = { x: number; y: number; w: number; h: number; diff_pixels: number };
+type ElementRect = { x: number; y: number; w: number; h: number };
+type ElementInfo = { rect: ElementRect; text: string };
+type SelectorMatch = {
+  a: ElementInfo | null;
+  b: ElementInfo | null;
+  delta: { dx: number; dy: number; dw: number; dh: number } | null;
+};
+type SelectorResult = { selector: string; matches: SelectorMatch[] };
 
 const HELP = `${pkg.name} v${pkg.version}
 
@@ -54,6 +63,12 @@ OPTIONS
                                  before navigating. Use for authenticated pages.
                                  Save state first with \`agent-browser state save <path>\`.
                                  URL mode only.
+      --rects <selector>         Capture getBoundingClientRect for matching elements on
+                                 both URLs and emit position deltas. Repeatable.
+                                 URL mode only.
+      --min-cluster <N>          Filter out diff regions smaller than N pixels (default 1).
+      --max-regions <N>          Cap the diff_regions array at the top N largest clusters
+                                 (default 100; set 0 for unlimited).
   -h, --help                     Show this help and exit.
   -V, --version                  Print version and exit.
 
@@ -86,6 +101,10 @@ EXAMPLES
   pixel-diff https://app.example.com/dashboard{,?env=stg} \\
     --state /tmp/auth.json --json
 
+  # Inspect exact pixel deltas of named elements
+  pixel-diff URL_A URL_B --rects 'h1' --rects '.cta' --json
+  # → "h1" delta { dx: 0, dy: 8, dw: 0, dh: 0 } says the h1 moved 8px down in B.
+
   # One-liner from GitHub
   bunx iemong/pixel-diff URL_A URL_B --json
 
@@ -96,24 +115,30 @@ JSON SCHEMA — image mode
     "width": 1280, "height": 720,
     "total_pixels": 921600, "diff_pixels": 1234, "diff_percent": 0.134,
     "threshold": 0.1, "identical": false,
-    "ignore_regions": []
+    "ignore_regions": [],
+    "diff_regions": [
+      { "x": 100, "y": 80, "w": 200, "h": 8, "diff_pixels": 1600 }
+    ]
   }
 
 JSON SCHEMA — URL mode
   {
     "mode": "url",
     "url_a": "...", "url_b": "...",
-    "threshold": 0.1,
-    "ignore_regions": [],
-    "all_identical": false,
+    "threshold": 0.1, "ignore_regions": [], "all_identical": false,
     "results": [
       { "viewport": { "width": 1280, "height": 800 },
-        "image_a": "/tmp/.../a-1280x800.png",
-        "image_b": "/tmp/.../b-1280x800.png",
-        "out": "./diff-1280x800.png",
+        "image_a": "...", "image_b": "...", "out": "./diff-1280x800.png",
         "width": 1280, "height": 800,
         "total_pixels": 1024000, "diff_pixels": 832, "diff_percent": 0.081,
-        "identical": false }
+        "identical": false,
+        "diff_regions": [{ "x":..., "y":..., "w":..., "h":..., "diff_pixels":... }],
+        "rects": [        // present only when --rects was passed
+          { "selector": "h1",
+            "matches": [
+              { "a": { "rect": {"x":24,"y":80,"w":400,"h":48}, "text": "Welcome" },
+                "b": { "rect": {"x":24,"y":88,"w":400,"h":48}, "text": "Welcome" },
+                "delta": { "dx": 0, "dy": 8, "dw": 0, "dh": 0 } } ] } ] }
     ]
   }
 
@@ -139,6 +164,9 @@ type Args = {
   workdir: string | null;
   keep: boolean;
   statePath: string | null;
+  minCluster: number;
+  maxRegions: number;
+  rectsSelectors: string[];
 };
 
 function parseViewportSpec(s: string): Viewport | null {
@@ -184,6 +212,9 @@ function parseArgs(argv: string[]): Args | { _error: string } {
     workdir: null,
     keep: false,
     statePath: null,
+    minCluster: 1,
+    maxRegions: 100,
+    rectsSelectors: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -228,6 +259,23 @@ function parseArgs(argv: string[]): Args | { _error: string } {
       const r = parseIgnoreRect(raw);
       if (!r) return { _error: `invalid --ignore: ${raw} (expected x,y,w,h with w,h > 0)` };
       out.ignore.push(r);
+    } else if (a === "--min-cluster" || a.startsWith("--min-cluster=")) {
+      const raw = a.startsWith("--min-cluster=") ? a.slice("--min-cluster=".length) : argv[++i];
+      if (raw === undefined) return { _error: "missing value for --min-cluster" };
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 1) return { _error: `invalid --min-cluster: ${raw} (expected ≥ 1)` };
+      out.minCluster = Math.floor(n);
+    } else if (a === "--max-regions" || a.startsWith("--max-regions=")) {
+      const raw = a.startsWith("--max-regions=") ? a.slice("--max-regions=".length) : argv[++i];
+      if (raw === undefined) return { _error: "missing value for --max-regions" };
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 0) return { _error: `invalid --max-regions: ${raw} (expected ≥ 0)` };
+      out.maxRegions = Math.floor(n);
+    } else if (a === "--rects" || a.startsWith("--rects=")) {
+      const raw = a.startsWith("--rects=") ? a.slice("--rects=".length) : argv[++i];
+      if (raw === undefined) return { _error: "missing value for --rects" };
+      if (!raw.trim()) return { _error: "--rects selector cannot be empty" };
+      out.rectsSelectors.push(raw);
     } else if (a.startsWith("-")) {
       return { _error: `unknown option: ${a}` };
     } else {
@@ -314,6 +362,79 @@ function maskRegions(
   }
 }
 
+/**
+ * Find connected clusters of diff pixels in pixelmatch's output buffer.
+ * pixelmatch paints diff pixels as exact #ff0000 by default — we detect them
+ * via exact RGB equality and flood-fill 8-connected neighbors.
+ */
+function findClusters(
+  buffer: Buffer,
+  width: number,
+  height: number,
+  minCluster: number,
+  maxRegions: number,
+): DiffRegion[] {
+  const total = width * height;
+  const visited = new Uint8Array(total);
+  const out: DiffRegion[] = [];
+
+  const isDiff = (idx: number): boolean =>
+    buffer[idx] === 255 && buffer[idx + 1] === 0 && buffer[idx + 2] === 0;
+
+  // Reusable stack for BFS iteration to avoid GC churn
+  const stack: number[] = [];
+
+  for (let y0 = 0; y0 < height; y0++) {
+    for (let x0 = 0; x0 < width; x0++) {
+      const i0 = y0 * width + x0;
+      if (visited[i0]) continue;
+      visited[i0] = 1;
+      if (!isDiff(i0 * 4)) continue;
+
+      let minX = x0, maxX = x0, minY = y0, maxY = y0, count = 1;
+      stack.length = 0;
+      stack.push(i0);
+
+      while (stack.length > 0) {
+        const cur = stack.pop()!;
+        const cx = cur % width;
+        const cy = (cur - cx) / width;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+            const ni = ny * width + nx;
+            if (visited[ni]) continue;
+            visited[ni] = 1;
+            if (!isDiff(ni * 4)) continue;
+            count++;
+            if (nx < minX) minX = nx;
+            else if (nx > maxX) maxX = nx;
+            if (ny < minY) minY = ny;
+            else if (ny > maxY) maxY = ny;
+            stack.push(ni);
+          }
+        }
+      }
+
+      if (count >= minCluster) {
+        out.push({
+          x: minX,
+          y: minY,
+          w: maxX - minX + 1,
+          h: maxY - minY + 1,
+          diff_pixels: count,
+        });
+      }
+    }
+  }
+
+  out.sort((a, b) => b.diff_pixels - a.diff_pixels);
+  return maxRegions > 0 && out.length > maxRegions ? out.slice(0, maxRegions) : out;
+}
+
 type DiffResult = {
   width: number;
   height: number;
@@ -322,6 +443,7 @@ type DiffResult = {
   diff_percent: number;
   identical: boolean;
   out: string;
+  diff_regions: DiffRegion[];
 };
 
 function diffPair(
@@ -330,6 +452,8 @@ function diffPair(
   outPath: string,
   threshold: number,
   ignore: IgnoreRect[],
+  minCluster: number,
+  maxRegions: number,
   json: boolean,
 ): DiffResult {
   const imgA = readPng(aPath, json);
@@ -369,6 +493,7 @@ function diffPair(
 
   const total = width * height;
   const pct = Number(((diffPixels / total) * 100).toFixed(3));
+  const regions = diffPixels > 0 ? findClusters(diff.data, width, height, minCluster, maxRegions) : [];
   return {
     width,
     height,
@@ -377,20 +502,93 @@ function diffPair(
     diff_percent: pct,
     identical: diffPixels === 0,
     out: outPath,
+    diff_regions: regions,
   };
+}
+
+function buildRectsEvalScript(selectors: string[]): string {
+  // Returns an array (one entry per selector) of arrays of element infos
+  // (rect + truncated text). Wrapped in JSON.stringify so eval output is a
+  // single line of JSON regardless of agent-browser's formatting.
+  const selJson = JSON.stringify(selectors);
+  return (
+    `JSON.stringify((${selJson}).map(function(sel){` +
+    `try{` +
+    `return Array.prototype.slice.call(document.querySelectorAll(sel)).map(function(el){` +
+    `var r=el.getBoundingClientRect();` +
+    `return{rect:{x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)},` +
+    `text:(el.textContent||'').trim().slice(0,100)};` +
+    `});` +
+    `}catch(e){return[];}` +
+    `}))`
+  );
+}
+
+function parseRectsEvalOutput(stdout: string): ElementInfo[][] {
+  // agent-browser may wrap eval results with prefix/suffix lines; find the
+  // first valid JSON array in the output.
+  const text = stdout.trim();
+  // Try direct parse first (clean output)
+  const direct = tryParseRects(text);
+  if (direct) return direct;
+  // Else search line by line
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("[") && !trimmed.startsWith('"[')) continue;
+    const r = tryParseRects(trimmed);
+    if (r) return r;
+  }
+  return [];
+}
+
+function tryParseRects(s: string): ElementInfo[][] | null {
+  try {
+    let v: unknown = JSON.parse(s);
+    // eval result was already a JSON-string of an array → first parse gives the array
+    // But agent-browser may double-encode: parsed once is a string starting with [.
+    if (typeof v === "string") {
+      try { v = JSON.parse(v); } catch { /* keep as-is */ }
+    }
+    if (!Array.isArray(v)) return null;
+    const out: ElementInfo[][] = [];
+    for (const group of v) {
+      if (!Array.isArray(group)) { out.push([]); continue; }
+      const matches: ElementInfo[] = [];
+      for (const el of group) {
+        if (!el || typeof el !== "object") continue;
+        const rect = (el as Record<string, unknown>).rect as Record<string, unknown> | undefined;
+        const text = (el as Record<string, unknown>).text;
+        if (!rect) continue;
+        const x = Number(rect.x), y = Number(rect.y), w = Number(rect.w), h = Number(rect.h);
+        if (![x, y, w, h].every((n) => Number.isFinite(n))) continue;
+        matches.push({ rect: { x, y, w, h }, text: typeof text === "string" ? text : "" });
+      }
+      out.push(matches);
+    }
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 async function captureUrl(
   url: string,
   viewport: Viewport,
   pngOut: string,
-  opts: { fullPage: boolean; waitMs: number; sessionSuffix: string; statePath: string | null },
+  opts: {
+    fullPage: boolean;
+    waitMs: number;
+    sessionSuffix: string;
+    statePath: string | null;
+    selectors: string[];
+  },
   json: boolean,
-): Promise<void> {
+): Promise<{ rectsBySelector: ElementInfo[][] }> {
   const session = `pixel-diff-${process.pid}-${Date.now()}-${opts.sessionSuffix}`;
   const W = String(viewport.width);
   const H = String(viewport.height);
   const WAIT = String(opts.waitMs);
+  let rectsBySelector: ElementInfo[][] = [];
   try {
     await $`agent-browser --session ${session} open about:blank`.quiet();
     await $`agent-browser --session ${session} set viewport ${W} ${H}`.quiet();
@@ -406,6 +604,15 @@ async function captureUrl(
       await $`agent-browser --session ${session} screenshot --full ${pngOut}`.quiet();
     } else {
       await $`agent-browser --session ${session} screenshot ${pngOut}`.quiet();
+    }
+    if (opts.selectors.length > 0) {
+      const js = buildRectsEvalScript(opts.selectors);
+      const evalOut = await $`agent-browser --session ${session} eval ${js}`.quiet().text();
+      rectsBySelector = parseRectsEvalOutput(evalOut);
+      if (rectsBySelector.length === 0) {
+        // Fill with empties so downstream zip keeps selector alignment
+        rectsBySelector = opts.selectors.map(() => []);
+      }
     }
   } catch (e) {
     await $`agent-browser --session ${session} close`.nothrow().quiet();
@@ -430,6 +637,38 @@ async function captureUrl(
     );
   }
   await $`agent-browser --session ${session} close`.nothrow().quiet();
+  return { rectsBySelector };
+}
+
+function buildSelectorResults(
+  selectors: string[],
+  aResults: ElementInfo[][],
+  bResults: ElementInfo[][],
+): SelectorResult[] {
+  return selectors.map((selector, i) => {
+    const aMatches = aResults[i] ?? [];
+    const bMatches = bResults[i] ?? [];
+    const len = Math.max(aMatches.length, bMatches.length);
+    const matches: SelectorMatch[] = [];
+    for (let j = 0; j < len; j++) {
+      const a = aMatches[j] ?? null;
+      const b = bMatches[j] ?? null;
+      matches.push({
+        a,
+        b,
+        delta:
+          a && b
+            ? {
+                dx: b.rect.x - a.rect.x,
+                dy: b.rect.y - a.rect.y,
+                dw: b.rect.w - a.rect.w,
+                dh: b.rect.h - a.rect.h,
+              }
+            : null,
+      });
+    }
+    return { selector, matches };
+  });
 }
 
 function ensureAgentBrowser(json: boolean): void {
@@ -487,8 +726,16 @@ async function runImageMode(args: Args, aPath: string, bPath: string, outPath: s
     }
   }
 
+  if (args.rectsSelectors.length > 0) {
+    fail(json, EXIT.USAGE, {
+      error: "usage",
+      message: "--rects is only valid in URL mode",
+      suggestion: "pass URLs instead of file paths, or drop --rects",
+    }, ["error: --rects requires URL inputs"]);
+  }
+
   const threshold = resolveThreshold(args);
-  const result = diffPair(aPath, bPath, outPath, threshold, args.ignore, json);
+  const result = diffPair(aPath, bPath, outPath, threshold, args.ignore, args.minCluster, args.maxRegions, json);
 
   emit(json, {
     mode: "image",
@@ -503,13 +750,66 @@ async function runImageMode(args: Args, aPath: string, bPath: string, outPath: s
     threshold,
     identical: result.identical,
     ignore_regions: args.ignore,
+    diff_regions: result.diff_regions,
   }, [
     `size:        ${result.width}x${result.height} (${result.total_pixels.toLocaleString()} px)`,
     `diff pixels: ${result.diff_pixels.toLocaleString()} (${result.diff_percent}%)`,
     `diff image:  ${result.out}`,
+    ...formatRegionsHuman(result.diff_regions, "  "),
   ]);
 
   process.exit(result.identical ? EXIT.IDENTICAL : EXIT.DIFF_FOUND);
+}
+
+function formatRegionsHuman(regions: DiffRegion[], indent = ""): string[] {
+  if (regions.length === 0) return [];
+  const top = regions.slice(0, 3);
+  const lines = [`${indent}top regions:`];
+  for (const r of top) {
+    lines.push(`${indent}  [${r.diff_pixels.toLocaleString()} px]  ${r.w}x${r.h}  at  (${r.x}, ${r.y})`);
+  }
+  if (regions.length > 3) {
+    const rest = regions.slice(3).reduce((sum, r) => sum + r.diff_pixels, 0);
+    lines.push(`${indent}  [${rest.toLocaleString()} px]  in ${regions.length - 3} more region(s)`);
+  }
+  return lines;
+}
+
+function formatRectsHuman(rects: SelectorResult[], indent = ""): string[] {
+  if (rects.length === 0) return [];
+  const lines: string[] = [`${indent}rects:`];
+  for (const r of rects) {
+    if (r.matches.length === 0) {
+      lines.push(`${indent}  ${r.selector}: (no matches)`);
+      continue;
+    }
+    for (let i = 0; i < r.matches.length; i++) {
+      const m = r.matches[i]!;
+      const label = r.matches.length > 1 ? `${r.selector}[${i}]` : r.selector;
+      if (!m.a && !m.b) continue;
+      if (!m.a) {
+        lines.push(`${indent}  ${label}: A=(missing)  B=${formatElement(m.b!)}`);
+      } else if (!m.b) {
+        lines.push(`${indent}  ${label}: A=${formatElement(m.a)}  B=(missing)`);
+      } else {
+        const d = m.delta!;
+        const tag =
+          d.dx === 0 && d.dy === 0 && d.dw === 0 && d.dh === 0
+            ? "match"
+            : `Δ ${signed(d.dx)},${signed(d.dy)} (size ${signed(d.dw)},${signed(d.dh)})`;
+        lines.push(`${indent}  ${label}: ${formatElement(m.a)} → ${formatElement(m.b)}  [${tag}]`);
+      }
+    }
+  }
+  return lines;
+}
+
+function formatElement(e: ElementInfo): string {
+  return `(${e.rect.x},${e.rect.y} ${e.rect.w}x${e.rect.h})`;
+}
+
+function signed(n: number): string {
+  return n > 0 ? `+${n}` : `${n}`;
 }
 
 async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: string) {
@@ -533,7 +833,12 @@ async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: strin
   mkdirSync(workdir, { recursive: true });
 
   const threshold = resolveThreshold(args);
-  const results: (DiffResult & { viewport: Viewport; image_a: string; image_b: string })[] = [];
+  const results: (DiffResult & {
+    viewport: Viewport;
+    image_a: string;
+    image_b: string;
+    rects: SelectorResult[];
+  })[] = [];
 
   log(json, `[pixel-diff]`);
   log(json, `  url_a:      ${urlA}`);
@@ -546,6 +851,9 @@ async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: strin
   if (args.ignore.length > 0) {
     log(json, `  ignore:     ${args.ignore.map((r) => `${r.x},${r.y},${r.w},${r.h}`).join(" / ")}`);
   }
+  if (args.rectsSelectors.length > 0) {
+    log(json, `  rects:      ${args.rectsSelectors.join(" / ")}`);
+  }
 
   for (const v of viewports) {
     const tag = `${v.width}x${v.height}`;
@@ -556,14 +864,18 @@ async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: strin
       fullPage: args.fullPage,
       waitMs: args.waitMs,
       statePath: args.statePath,
+      selectors: args.rectsSelectors,
     };
-    await captureUrl(urlA, v, aPng, { ...captureOpts, sessionSuffix: `a-${tag}` }, json);
-    await captureUrl(urlB, v, bPng, { ...captureOpts, sessionSuffix: `b-${tag}` }, json);
+    const aCap = await captureUrl(urlA, v, aPng, { ...captureOpts, sessionSuffix: `a-${tag}` }, json);
+    const bCap = await captureUrl(urlB, v, bPng, { ...captureOpts, sessionSuffix: `b-${tag}` }, json);
 
     const diffOut = multi ? suffixedOut(outPath, v) : outPath;
     log(json, `→ diff ${tag}`);
-    const d = diffPair(aPng, bPng, diffOut, threshold, args.ignore, json);
-    results.push({ ...d, viewport: v, image_a: aPng, image_b: bPng });
+    const d = diffPair(aPng, bPng, diffOut, threshold, args.ignore, args.minCluster, args.maxRegions, json);
+    const rects = args.rectsSelectors.length > 0
+      ? buildSelectorResults(args.rectsSelectors, aCap.rectsBySelector, bCap.rectsBySelector)
+      : [];
+    results.push({ ...d, viewport: v, image_a: aPng, image_b: bPng, rects });
   }
 
   const allIdentical = results.every((r) => r.identical);
@@ -586,12 +898,16 @@ async function runUrlMode(args: Args, urlA: string, urlB: string, outPath: strin
       diff_pixels: r.diff_pixels,
       diff_percent: r.diff_percent,
       identical: r.identical,
+      diff_regions: r.diff_regions,
+      ...(r.rects.length > 0 ? { rects: r.rects } : {}),
     })),
   }, results.flatMap((r) => [
     `[${r.viewport.width}x${r.viewport.height}]`,
     `  size:        ${r.width}x${r.height} (${r.total_pixels.toLocaleString()} px)`,
     `  diff pixels: ${r.diff_pixels.toLocaleString()} (${r.diff_percent}%)`,
     `  diff image:  ${r.out}`,
+    ...formatRegionsHuman(r.diff_regions, "  "),
+    ...formatRectsHuman(r.rects, "  "),
   ]).concat(multi ? [`all identical: ${allIdentical}`] : []));
 
   if (!args.keep && !args.workdir) {
