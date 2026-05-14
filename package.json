@@ -1,7 +1,7 @@
 {
   "name": "pixel-diff",
-  "version": "0.3.0",
-  "description": "Pixel-level PNG diff CLI powered by pixelmatch. Runnable via `bunx github:iemong/pixel-diff` — no install, no registry.",
+  "version": "0.4.0",
+  "description": "Pixel-level PNG/URL diff CLI powered by pixelmatch. URL mode uses agent-browser. Runnable via `bunx iemong/pixel-diff` — no install, no registry.",
   "type": "module",
   "module": "index.ts",
   "bin": {
