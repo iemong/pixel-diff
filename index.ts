@@ -53,7 +53,7 @@ EXAMPLES
   pixel-diff a.png b.png out.png --threshold 0.05
 
   # One-liner from GitHub (no install, no registry)
-  bunx github:iemong/pixel-diff a.png b.png --json
+  bunx iemong/pixel-diff a.png b.png --json
 
 JSON SCHEMA (success)
   {

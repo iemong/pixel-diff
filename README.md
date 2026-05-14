@@ -8,14 +8,22 @@ Runs on [Bun](https://bun.com). One-liner straight from GitHub — no install, n
 Requires Bun (`curl -fsSL https://bun.sh/install | bash`).
 
 ```bash
-bunx github:iemong/pixel-diff a.png b.png                       # writes ./diff.png
-bunx github:iemong/pixel-diff a.png b.png out.png               # custom output path
-bunx github:iemong/pixel-diff a.png b.png --threshold 0.05      # stricter match
-bunx github:iemong/pixel-diff a.png b.png --json                # machine-readable
-bunx github:iemong/pixel-diff --help                            # full help
+bunx iemong/pixel-diff a.png b.png                       # writes ./diff.png
+bunx iemong/pixel-diff a.png b.png out.png               # custom output path
+bunx iemong/pixel-diff a.png b.png --threshold 0.05      # stricter match
+bunx iemong/pixel-diff a.png b.png --json                # machine-readable
+bunx iemong/pixel-diff --help                            # full help
 ```
 
 `bunx` clones the repo, installs deps, and runs `index.ts` directly.
+The bare `iemong/pixel-diff` shorthand is the same as `github:iemong/pixel-diff#main`.
+
+### Install globally
+
+```bash
+bun add -g github:iemong/pixel-diff
+pixel-diff a.png b.png
+```
 
 Human-readable output:
 
