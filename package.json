@@ -1,11 +1,38 @@
 {
-  "name": "pixel-diff",
-  "module": "index.ts",
+  "name": "@iemong/pixel-diff",
+  "version": "0.1.0",
+  "description": "Pixel-level PNG diff CLI powered by pixelmatch. Runnable via bunx/npx without setup.",
   "type": "module",
-  "private": true,
-  "scripts": {
-    "diff": "bun run index.ts"
+  "bin": {
+    "pixel-diff": "./dist/cli.js"
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "diff": "bun run index.ts",
+    "build": "bun build ./index.ts --target=node --outfile=dist/cli.js && chmod +x dist/cli.js",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "pixelmatch",
+    "diff",
+    "image",
+    "png",
+    "visual-regression",
+    "cli"
+  ],
+  "author": "iemong",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iemong/pixel-diff.git"
+  },
+  "bugs": {
+    "url": "https://github.com/iemong/pixel-diff/issues"
+  },
+  "homepage": "https://github.com/iemong/pixel-diff#readme",
   "devDependencies": {
     "@types/bun": "latest",
     "@types/pixelmatch": "^5.2.6",
@@ -17,5 +44,11 @@
   "dependencies": {
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

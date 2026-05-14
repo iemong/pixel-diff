@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
 import pixelmatch from "pixelmatch";
 import { PNG } from "pngjs";
@@ -6,7 +6,7 @@ import { PNG } from "pngjs";
 const [, , aPath, bPath, outPath = "diff.png"] = process.argv;
 
 if (!aPath || !bPath) {
-  console.error("Usage: bun run diff <imageA.png> <imageB.png> [outDiff.png]");
+  console.error("Usage: pixel-diff <imageA.png> <imageB.png> [outDiff.png]");
   console.error("       defaults: outDiff.png = ./diff.png");
   process.exit(2);
 }
